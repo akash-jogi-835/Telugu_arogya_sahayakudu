@@ -1,5 +1,8 @@
 # Telugu Health Q&A System
 
+## To Access 
+Link : https://firstgeminiapp-3gwjuhxefehjpjw5krvakk.streamlit.app/
+
 ## Overview
 
 This is a Telugu Health Q&A system built with Streamlit that simulates an MT5 fine-tuned model for providing health-related answers in Telugu. The application serves as a prototype for demonstrating Telugu medical question-answering capabilities through a web interface.
