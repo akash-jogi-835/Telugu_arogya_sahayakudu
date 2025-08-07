@@ -1,10 +1,9 @@
 streamlit==1.35.0
-transformers>=4.40.0
-torch>=2.2.0 --extra-index-url https://download.pytorch.org/whl/cpu
-numpy
-pandas
-scikit-learn
-requests
-protobuf
+transformers==4.40.2
+torch==2.2.2 --extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.26.4
+pandas==2.2.1
+scikit-learn==1.4.1.post1
+requests==2.31.0
+protobuf==4.25.3
 sentencepiece==0.1.99
---find-links https://download.pytorch.org/whl/torch_stable.html
