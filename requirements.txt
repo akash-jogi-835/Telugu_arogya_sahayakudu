@@ -1,0 +1,9 @@
+streamlit==1.35.0
+sentencepiece==0.1.99
+transformers>=4.40.0
+torch>=2.2.0
+numpy
+pandas
+scikit-learn
+requests
+protobuf
