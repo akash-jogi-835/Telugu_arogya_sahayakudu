@@ -8,15 +8,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
-from torch.nn.utils.rnn import pad_sequence
 import sentencepiece as spm
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 import os
 import logging
 from pathlib import Path
-import pickle
+ 
 from dataclasses import dataclass
-import time
+ 
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -29,15 +28,15 @@ class TrainingConfig:
     max_source_length: int = 256
     max_target_length: int = 256
     batch_size: int = 8
-    learning_rate: float = 2e-5
+    learning_rate: float = 3e-5
     num_epochs: int = 3
-    warmup_steps: int = 500
+    warmup_steps: int = 1000
     save_steps: int = 500
-    eval_steps: int = 100
-    output_dir: str = "./mt5_telugu_health"
-    gradient_accumulation_steps: int = 1
-    fp16: bool = False
-    dataloader_num_workers: int = 0
+    eval_steps: int = 200
+    output_dir: str = "./mt5_telugu_health_output"
+    gradient_accumulation_steps: int = 2
+    fp16: bool = True
+    dataloader_num_workers: int = 4
 
 class TeluguHealthDataset(Dataset):
     """Dataset class for Telugu Health Q&A pairs"""
@@ -87,7 +86,7 @@ class TeluguHealthDataset(Dataset):
 class SimplifiedMT5Model(nn.Module):
     """Simplified MT5-like model for Telugu health Q&A"""
     
-    def __init__(self, vocab_size: int, d_model: int = 512, nhead: int = 8, 
+    def __init__(self, vocab_size: int, d_model: int = 786, nhead: int = 12, 
                  num_encoder_layers: int = 6, num_decoder_layers: int = 6):
         super().__init__()
         self.d_model = d_model
@@ -181,7 +180,7 @@ class PositionalEncoding(nn.Module):
 class TeluguTokenizer:
     """Simple tokenizer for Telugu text using SentencePiece"""
     
-    def __init__(self, vocab_size: int = 32000):
+    def __init__(self, vocab_size: int = 399):
         self.vocab_size = vocab_size
         self.sp_model = None
         self.pad_token_id = 0
@@ -280,232 +279,267 @@ class MT5FineTuner:
     
     def prepare_data(self, train_data: List[Dict], val_data: Optional[List[Dict]] = None):
         """Prepare training and validation datasets"""
-        logger.info("Preparing tokenizer and datasets...")
-        
-        # Extract all texts for tokenizer training
-        all_texts = []
-        for item in train_data:
-            all_texts.append(item.get('question', ''))
-            all_texts.append(item.get('answer', ''))
-        
-        if val_data:
-            for item in val_data:
-                all_texts.append(item.get('question', ''))
-                all_texts.append(item.get('answer', ''))
-        
-        # Train tokenizer
-        self.tokenizer = TeluguTokenizer(vocab_size=16000)  # Smaller vocab for simplified model
-        self.tokenizer.train_tokenizer(all_texts, "telugu_health_tokenizer")
-        
-        # Create datasets
-        self.train_dataset = TeluguHealthDataset(train_data, self.tokenizer, self.config)
-        if val_data:
-            self.val_dataset = TeluguHealthDataset(val_data, self.tokenizer, self.config)
-        else:
-            # Split training data for validation
-            split_idx = int(0.9 * len(train_data))
-            self.val_dataset = TeluguHealthDataset(train_data[split_idx:], self.tokenizer, self.config)
-            self.train_dataset = TeluguHealthDataset(train_data[:split_idx], self.tokenizer, self.config)
-        
-        logger.info(f"Training samples: {len(self.train_dataset)}")
-        logger.info(f"Validation samples: {len(self.val_dataset)}")
-    
+        try:
+            logger.info("Preparing tokenizer and datasets...")
+            
+            # Extract all texts for tokenizer training
+            all_texts = []
+            for item in train_data:
+                question = item.get('question', '')
+                answer = item.get('answer', '')
+                all_texts.append(question)
+                all_texts.append(answer)
+            
+            if val_data:
+                for item in val_data:
+                    question = item.get('question', '')
+                    answer = item.get('answer', '')
+                    all_texts.append(question)
+                    all_texts.append(answer)
+            
+            # Train tokenizer with smaller vocab size to avoid error
+            self.tokenizer = TeluguTokenizer(vocab_size=399)
+            self.tokenizer.train_tokenizer(all_texts, "telugu_health_tokenizer")
+            
+            # Create datasets
+            self.train_dataset = TeluguHealthDataset(train_data, self.tokenizer, self.config)
+            if val_data:
+                self.val_dataset = TeluguHealthDataset(val_data, self.tokenizer, self.config)
+            else:
+                # Split training data for validation
+                split_idx = int(0.8 * len(train_data))
+                self.val_dataset = TeluguHealthDataset(train_data[split_idx:], self.tokenizer, self.config)
+                self.train_dataset = TeluguHealthDataset(train_data[:split_idx], self.tokenizer, self.config)
+            
+            logger.info(f"Training samples: {len(self.train_dataset)}")
+            logger.info(f"Validation samples: {len(self.val_dataset)}")
+        except Exception as e:
+            logger.error(f"Error in prepare_data: {e}")
+            raise e
+    def normalize_telugu_text(self, text: str) -> str:
+        """Normalize Telugu text by removing unnecessary characters"""
+        import re
+        # Remove multiple spaces
+        text = re.sub(r'\s+', ' ', text)
+
+        # Remove special characters except Telugu and basic punctuation
+        text = re.sub(r'[^\u0C00-\u0C7F\s.,!?]', '', text)
+        # Add more normalization rules as needed
+        return text.strip()
+
     def create_model(self):
         """Create and initialize the model"""
-        vocab_size = self.tokenizer.sp_model.get_piece_size()
-        
-        self.model = SimplifiedMT5Model(
-            vocab_size=vocab_size,
-            d_model=512,
-            nhead=8,
-            num_encoder_layers=4,  # Smaller for efficiency
-            num_decoder_layers=4
-        )
-        
-        self.model.to(self.device)
-        logger.info(f"Model created with {sum(p.numel() for p in self.model.parameters()):,} parameters")
+        try:
+            vocab_size = self.tokenizer.sp_model.get_piece_size()
+            
+            self.model = SimplifiedMT5Model(
+                vocab_size=vocab_size,
+                d_model=512,
+                nhead=8,
+                num_encoder_layers=4,  # Smaller for efficiency
+                num_decoder_layers=4
+            )
+            
+            self.model.to(self.device)
+            logger.info(f"Model created with {sum(p.numel() for p in self.model.parameters()):,} parameters")
+        except Exception as e:
+            logger.error(f"Error in create_model: {e}")
+            raise e
     
     def train(self):
         """Train the model"""
-        if self.model is None:
-            self.create_model()
-        
-        # Create data loaders
-        train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=self.config.dataloader_num_workers
-        )
-        
-        val_loader = DataLoader(
-            self.val_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=self.config.dataloader_num_workers
-        )
-        
-        # Setup optimizer and scheduler
-        optimizer = optim.AdamW(self.model.parameters(), lr=self.config.learning_rate)
-        scheduler = optim.lr_scheduler.WarmupLR(optimizer, warmup_factor=0.1, warmup_iters=self.config.warmup_steps)
-        
-        criterion = nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
-        
-        # Training loop
-        logger.info("Starting training...")
-        global_step = 0
-        best_val_loss = float('inf')
-        
-        for epoch in range(self.config.num_epochs):
-            self.model.train()
-            total_loss = 0
+        try:
+            if self.model is None:
+                self.create_model()
             
-            for batch_idx, batch in enumerate(train_loader):
-                # Move batch to device
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
-                target_attention_mask = batch['target_attention_mask'].to(self.device)
-                
-                # Create target input (shift labels right)
-                tgt_input = labels.clone()
-                tgt_input = torch.cat([
-                    torch.full((tgt_input.size(0), 1), self.tokenizer.bos_token_id, dtype=tgt_input.dtype, device=self.device),
-                    tgt_input[:, :-1]
-                ], dim=1)
-                
-                # Forward pass
-                optimizer.zero_grad()
-                
-                outputs = self.model(
-                    src=input_ids,
-                    tgt=tgt_input,
-                    src_key_padding_mask=(attention_mask == 0),
-                    tgt_key_padding_mask=(target_attention_mask == 0)
-                )
-                
-                # Calculate loss
-                loss = criterion(outputs.reshape(-1, outputs.size(-1)), labels.reshape(-1))
-                
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                
-                total_loss += loss.item()
-                global_step += 1
-                
-                # Logging
-                if global_step % 10 == 0:
-                    logger.info(f"Epoch {epoch+1}/{self.config.num_epochs}, Step {global_step}, Loss: {loss.item():.4f}")
-                
-                # Validation
-                if global_step % self.config.eval_steps == 0:
-                    val_loss = self.evaluate(val_loader, criterion)
-                    logger.info(f"Validation Loss: {val_loss:.4f}")
-                    
-                    # Save best model
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        self.save_model(f"{self.config.output_dir}/best_model.pt")
-                
-                # Save checkpoint
-                if global_step % self.config.save_steps == 0:
-                    self.save_model(f"{self.config.output_dir}/checkpoint_{global_step}.pt")
+            # Create data loaders
+            train_loader = DataLoader(
+                self.train_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=True,
+                num_workers=self.config.dataloader_num_workers
+            )
             
-            avg_loss = total_loss / len(train_loader)
-            logger.info(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
-        
-        # Save final model
-        self.save_model(f"{self.config.output_dir}/final_model.pt")
-        logger.info("Training completed!")
+            val_loader = DataLoader(
+                self.val_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=False,
+                num_workers=self.config.dataloader_num_workers
+            )
+            
+            # Setup optimizer (no scheduler, as WarmupLR is not available)
+            optimizer = optim.AdamW(self.model.parameters(), lr=self.config.learning_rate)
+            criterion = nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
+
+            # Training loop
+            logger.info("Starting training...")
+            global_step = 0
+            best_val_loss = float('inf')
+
+            for epoch in range(self.config.num_epochs):
+                self.model.train()
+                total_loss = 0
+
+                for batch_idx, batch in enumerate(train_loader):
+                    # Move batch to device
+                    input_ids = batch['input_ids'].to(self.device)
+                    attention_mask = batch['attention_mask'].to(self.device)
+                    labels = batch['labels'].to(self.device)
+                    target_attention_mask = batch['target_attention_mask'].to(self.device)
+
+                    # Create target input (shift labels right)
+                    tgt_input = labels.clone()
+                    tgt_input = torch.cat([
+                        torch.full((tgt_input.size(0), 1), self.tokenizer.bos_token_id, dtype=tgt_input.dtype, device=self.device),
+                        tgt_input[:, :-1]
+                    ], dim=1)
+
+                    # Forward pass
+                    optimizer.zero_grad()
+
+                    outputs = self.model(
+                        src=input_ids,
+                        tgt=tgt_input,
+                        src_key_padding_mask=(attention_mask == 0),
+                        tgt_key_padding_mask=(target_attention_mask == 0)
+                    )
+
+                    # Calculate loss
+                    loss = criterion(outputs.reshape(-1, outputs.size(-1)), labels.reshape(-1))
+
+                    # Backward pass
+                    loss.backward()
+                    optimizer.step()
+
+                    total_loss += loss.item()
+                    global_step += 1
+
+                    # Logging
+                    if global_step % 10 == 0:
+                        logger.info(f"Epoch {epoch+1}/{self.config.num_epochs}, Step {global_step}, Loss: {loss.item():.4f}")
+
+                    # Validation
+                    if global_step % self.config.eval_steps == 0:
+                        val_loss = self.evaluate(val_loader, criterion)
+                        logger.info(f"Validation Loss: {val_loss:.4f}")
+
+                        # Save best model
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            self.save_model(f"{self.config.output_dir}/best_model.pt")
+
+                    # Save checkpoint
+                    if global_step % self.config.save_steps == 0:
+                        self.save_model(f"{self.config.output_dir}/checkpoint_{global_step}.pt")
+
+                avg_loss = total_loss / len(train_loader)
+                logger.info(f"Epoch {epoch+1} completed. Average Loss: {avg_loss:.4f}")
+
+            # Save final model
+            self.save_model(f"{self.config.output_dir}/final_model.pt")
+            logger.info("Training completed!")
+        except Exception as e:
+            logger.error(f"Error during training: {e}")
+            raise e
     
     def evaluate(self, val_loader, criterion):
         """Evaluate the model"""
-        self.model.eval()
-        total_loss = 0
-        
-        with torch.no_grad():
-            for batch in val_loader:
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
-                target_attention_mask = batch['target_attention_mask'].to(self.device)
-                
-                # Create target input
-                tgt_input = labels.clone()
-                tgt_input = torch.cat([
-                    torch.full((tgt_input.size(0), 1), self.tokenizer.bos_token_id, dtype=tgt_input.dtype, device=self.device),
-                    tgt_input[:, :-1]
-                ], dim=1)
-                
-                outputs = self.model(
-                    src=input_ids,
-                    tgt=tgt_input,
-                    src_key_padding_mask=(attention_mask == 0),
-                    tgt_key_padding_mask=(target_attention_mask == 0)
-                )
-                
-                loss = criterion(outputs.reshape(-1, outputs.size(-1)), labels.reshape(-1))
-                total_loss += loss.item()
-        
-        self.model.train()
-        return total_loss / len(val_loader)
+        try:
+            self.model.eval()
+            total_loss = 0
+            
+            with torch.no_grad():
+                for batch in val_loader:
+                    input_ids = batch['input_ids'].to(self.device)
+                    attention_mask = batch['attention_mask'].to(self.device)
+                    labels = batch['labels'].to(self.device)
+                    target_attention_mask = batch['target_attention_mask'].to(self.device)
+                    
+                    # Create target input
+                    tgt_input = labels.clone()
+                    tgt_input = torch.cat([
+                        torch.full((tgt_input.size(0), 1), self.tokenizer.bos_token_id, dtype=tgt_input.dtype, device=self.device),
+                        tgt_input[:, :-1]
+                    ], dim=1)
+                    
+                    outputs = self.model(
+                        src=input_ids,
+                        tgt=tgt_input,
+                        src_key_padding_mask=(attention_mask == 0),
+                        tgt_key_padding_mask=(target_attention_mask == 0)
+                    )
+                    
+                    loss = criterion(outputs.reshape(-1, outputs.size(-1)), labels.reshape(-1))
+                    total_loss += loss.item()
+            
+            self.model.train()
+            return total_loss / len(val_loader)
+        except Exception as e:
+            logger.error(f"Error during evaluation: {e}")
+            raise e
     
-    def generate_answer(self, question: str, max_length: int = 100) -> str:
+    def generate_answer(self, question: str, max_length: int = 100, temperature: float = 0.7, top_k: int = 50) -> str:
         """Generate answer for a given question"""
-        if self.model is None or self.tokenizer is None:
-            raise ValueError("Model and tokenizer must be loaded first")
-        
-        self.model.eval()
-        
-        # Prepare input
-        source_text = f"Telugu health Q&A: {question}"
-        source_encoding = self.tokenizer(
-            source_text,
-            max_length=self.config.max_source_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        
-        input_ids = source_encoding['input_ids'].to(self.device)
-        attention_mask = source_encoding['attention_mask'].to(self.device)
-        
-        # Generate response
-        with torch.no_grad():
-            # Start with BOS token
-            generated = torch.tensor([[self.tokenizer.bos_token_id]], device=self.device)
-            
-            for _ in range(max_length):
-                outputs = self.model(
-                    src=input_ids,
-                    tgt=generated,
-                    src_key_padding_mask=(attention_mask == 0)
-                )
-                
-                # Get next token
-                next_token_logits = outputs[0, -1, :]
-                next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(0).unsqueeze(0)
-                
-                # Stop if EOS token is generated
-                if next_token.item() == self.tokenizer.eos_token_id:
-                    break
-                
-                generated = torch.cat([generated, next_token], dim=1)
-            
-            # Decode generated tokens
-            generated_ids = generated[0].cpu().tolist()
-            generated_text = self.tokenizer.decode(generated_ids[1:])  # Skip BOS token
-            
-        return generated_text
+        try:
+            if self.model is None or self.tokenizer is None:
+                raise ValueError("Model and tokenizer must be loaded first")
+
+            self.model.eval()
+
+            # Prepare input
+            source_text = f"Telugu health Q&A: {question}"
+            source_encoding = self.tokenizer(
+                source_text,
+                max_length=self.config.max_source_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+
+            input_ids = source_encoding['input_ids'].to(self.device)
+            attention_mask = source_encoding['attention_mask'].to(self.device)
+
+            # Generate response
+            with torch.no_grad():
+                # Start with BOS token
+                generated = torch.tensor([[self.tokenizer.bos_token_id]], device=self.device)
+
+                for _ in range(max_length):
+                    outputs = self.model(
+                        src=input_ids,
+                        tgt=generated,
+                        src_key_padding_mask=(attention_mask == 0)
+                    )
+                               
+                    # Get next token
+                    next_token_logits = outputs[0, -1, :] / temperature
+                    top_k_logits, top_k_indices = torch.topk(next_token_logits, top_k)
+                    probs = torch.softmax(top_k_logits, dim=-1)
+                    next_token = top_k_indices[torch.multinomial(probs, num_samples=1)]
+                    next_token = next_token.unsqueeze(0).to(self.device)
+
+                    # Stop if EOS token is generated
+                    if next_token.item() == self.tokenizer.eos_token_id:
+                        break
+
+                    generated = torch.cat([generated, next_token], dim=1)
+
+                # Decode generated tokens, skipping special tokens (PAD, BOS, UNK)
+                generated_ids = generated[0].cpu().tolist()[1:]  # Skip BOS token
+                filtered_ids = [tid for tid in generated_ids if tid not in [self.tokenizer.pad_token_id, self.tokenizer.bos_token_id, self.tokenizer.unk_token_id]]
+                generated_text = self.tokenizer.decode(filtered_ids)
+
+            return generated_text
+        except Exception as e:
+            logger.error(f"Error during generate_answer: {e}")
+            raise e
     
     def save_model(self, path: str):
         """Save model and tokenizer"""
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'config': self.config,
-            'tokenizer_model': f"telugu_health_tokenizer.model"
+            'tokenizer_model': "telugu_health_tokenizer.model"
         }, path)
         
         # Copy tokenizer model
@@ -587,24 +621,25 @@ def create_sample_dataset() -> List[Dict]:
     return sample_data
 
 if __name__ == "__main__":
-    # Example usage
+    # Example usage with large dataset
     config = TrainingConfig(
         batch_size=4,
-        num_epochs=2,
+        num_epochs=10,  # Increased epochs for better learning
         learning_rate=1e-4,
         output_dir="./mt5_telugu_health_output"
     )
-    
-    # Create sample dataset
-    train_data = create_sample_dataset()
-    
+
+    # Load large dataset from JSON file
+    dataset_path = "telugu_health_dataset_large.json"
+    train_data = load_dataset_from_json(dataset_path)
+
     # Initialize fine-tuner
     fine_tuner = MT5FineTuner(config)
-    
+
     # Prepare data and train
     fine_tuner.prepare_data(train_data)
     fine_tuner.train()
-    
+
     # Test generation
     question = "తలనొప్పికి ఏమి చేయాలి?"
     answer = fine_tuner.generate_answer(question)
