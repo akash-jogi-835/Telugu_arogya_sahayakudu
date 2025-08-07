@@ -7,3 +7,4 @@ pandas
 scikit-learn
 requests
 protobuf
+repl-nix-workspace==0.1.0
