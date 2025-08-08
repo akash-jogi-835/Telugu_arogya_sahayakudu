@@ -1,7 +1,7 @@
 # Telugu Health Q&A System
 
 ## To Access 
-Link : https://firstgeminiapp-3gwjuhxefehjpjw5krvakk.streamlit.app/
+Link : https://teluguarogyasahayakudu-eismidaos5gh5ufqkvacwj.streamlit.app/#data-validation
 
 ## Overview
 
